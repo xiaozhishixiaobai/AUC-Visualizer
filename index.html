@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AUC 与 ROC：排序能力可视化</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <style>
+    .cm-cell { transition: background-color 0.25s ease, transform 0.2s ease; }
+    .cm-cell:hover { transform: scale(1.02); }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
+  <div class="max-w-7xl mx-auto px-4 py-8 space-y-6">
+    <!-- 顶部 -->
+    <header class="text-center space-y-2">
+      <h1 class="text-3xl font-bold tracking-tight text-white">AUC 与 ROC：由排序决定的曲线下面积</h1>
+      <p class="text-slate-400 max-w-3xl mx-auto text-sm leading-relaxed">
+        通过预测分数分布与阈值，观察混淆矩阵与 ROC 上当前工作点的变化。
+        <span class="text-emerald-400/90">AUC</span> 用梯形法则对完整 ROC 积分，衡量随机一对正、负样本中正样本分数更高的概率；曲线越靠左上，排序越好。
+      </p>
+    </header>
+
+    <!-- 数据集切换 -->
+    <div class="flex flex-wrap items-center justify-center gap-2">
+      <span class="text-slate-500 text-sm mr-2">数据集</span>
+      <button type="button" data-dataset="good" class="ds-tab px-4 py-2 rounded-lg text-sm font-medium bg-emerald-600 text-white ring-2 ring-emerald-400">好 (Good)</button>
+      <button type="button" data-dataset="medium" class="ds-tab px-4 py-2 rounded-lg text-sm font-medium bg-slate-800 text-slate-300 hover:bg-slate-700">中 (Medium)</button>
+      <button type="button" data-dataset="poor" class="ds-tab px-4 py-2 rounded-lg text-sm font-medium bg-slate-800 text-slate-300 hover:bg-slate-700">差 (Poor)</button>
+    </div>
+
+    <!-- 阈值滑块 -->
+    <div class="rounded-2xl border border-slate-700 bg-slate-900/80 p-5 shadow-xl">
+      <div class="flex flex-col sm:flex-row sm:items-center gap-4">
+        <label for="threshold" class="text-sm font-semibold text-amber-300 whitespace-nowrap">分类阈值 τ</label>
+        <input id="threshold" type="range" min="0" max="1000" value="1000" class="flex-1 h-3 rounded-lg appearance-none bg-slate-700 accent-amber-400 cursor-pointer" />
+        <div class="font-mono text-lg text-amber-200 tabular-nums min-w-[4.5rem] text-right" id="thresholdDisplay">1.000</div>
+      </div>
+      <p class="mt-2 text-xs text-slate-500">规则：<span class="text-slate-400">score ≥ τ → 预测为正类</span>。τ = 1 时，若所有分数 &lt; 1，则全员预测为负 → TP=0, FP=0。</p>
+    </div>
+
+    <!-- 中部：分布 + 混淆矩阵 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div class="rounded-2xl border border-slate-700 bg-slate-900/60 p-4 overflow-hidden">
+        <h2 class="text-sm font-semibold text-slate-300 mb-2">分数分布（正 / 负样本）</h2>
+        <div id="distPlot" class="w-full" style="height: 360px;"></div>
+        <p class="text-xs text-slate-500 mt-1">竖线为当前阈值；高于阈值的区域视为判为「正」的一侧。</p>
+      </div>
+      <div class="rounded-2xl border border-slate-700 bg-slate-900/60 p-4 space-y-4">
+        <h2 class="text-sm font-semibold text-slate-300">混淆矩阵</h2>
+        <p class="text-[11px] text-slate-500 text-center">行：真实正 → 真实负；列：预测正 → 预测负（左上 TP，右下 TN）</p>
+        <div class="grid grid-cols-2 gap-3 max-w-sm mx-auto">
+          <div class="cm-cell rounded-xl p-4 text-center bg-emerald-900/40 border border-emerald-700/50">
+            <div class="text-xs text-emerald-300">TP</div>
+            <div id="valTP" class="text-2xl font-bold text-emerald-100">0</div>
+          </div>
+          <div class="cm-cell rounded-xl p-4 text-center bg-amber-900/40 border border-amber-700/50">
+            <div class="text-xs text-amber-300">FN</div>
+            <div id="valFN" class="text-2xl font-bold text-amber-100">0</div>
+          </div>
+          <div class="cm-cell rounded-xl p-4 text-center bg-rose-900/40 border border-rose-700/50">
+            <div class="text-xs text-rose-300">FP</div>
+            <div id="valFP" class="text-2xl font-bold text-rose-100">0</div>
+          </div>
+          <div class="cm-cell rounded-xl p-4 text-center bg-slate-800 border border-slate-600">
+            <div class="text-xs text-slate-400">TN</div>
+            <div id="valTN" class="text-2xl font-bold text-slate-100">0</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 text-center text-sm border-t border-slate-700 pt-4">
+          <div>
+            <div class="text-slate-500 text-xs">TPR (Recall)</div>
+            <div id="metricTPR" class="font-mono text-emerald-300">—</div>
+          </div>
+          <div>
+            <div class="text-slate-500 text-xs">FPR</div>
+            <div id="metricFPR" class="font-mono text-rose-300">—</div>
+          </div>
+          <div>
+            <div class="text-slate-500 text-xs">AUC（完整 ROC）</div>
+            <div id="metricAUC" class="font-mono text-sky-300">—</div>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 leading-relaxed">
+          AUC 由当前数据集上<strong>整条</strong> ROC 用梯形法则积分得到，不随 τ 改变；τ 只改变当前工作点 (FPR, TPR)。
+        </p>
+      </div>
+    </div>
+
+    <!-- ROC -->
+    <div class="rounded-2xl border border-slate-700 bg-slate-900/60 p-4">
+      <h2 class="text-sm font-semibold text-slate-300 mb-2">ROC 曲线与已走过的轨迹</h2>
+      <div id="rocPlot" class="w-full" style="height: 400px;"></div>
+      <p class="text-xs text-slate-500 mt-1">灰色为完整 ROC；高亮段为从 τ=1 降到当前 τ 时经过的点（按阈值从高到低）。</p>
+    </div>
+  </div>
+
+  <script>
+    // ---------- 随机数：Box-Muller 正态 ----------
+    function randn() {
+      let u = 0, v = 0;
+      while (u === 0) u = Math.random();
+      while (v === 0) v = Math.random();
+      return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    /** 生成分数并限制在 (0,1)，保证 τ=1 时严格无样本 ≥ 1（全员预测为负） */
+    function clampScore(x) {
+      const eps = 1e-6;
+      return Math.min(1 - eps, Math.max(eps, x));
+    }
+
+    /**
+     * 三种分离程度：好 / 中 / 差
+     * 正样本 label=1，负样本 label=0
+     */
+    function generateDataset(kind, nPos = 180, nNeg = 180) {
+      const pos = [];
+      const neg = [];
+      if (kind === 'good') {
+        for (let i = 0; i < nPos; i++) pos.push(clampScore(0.82 + randn() * 0.07));
+        for (let i = 0; i < nNeg; i++) neg.push(clampScore(0.18 + randn() * 0.07));
+      } else if (kind === 'medium') {
+        for (let i = 0; i < nPos; i++) pos.push(clampScore(0.62 + randn() * 0.12));
+        for (let i = 0; i < nNeg; i++) neg.push(clampScore(0.38 + randn() * 0.12));
+      } else {
+        for (let i = 0; i < nPos; i++) pos.push(clampScore(0.51 + randn() * 0.16));
+        for (let i = 0; i < nNeg; i++) neg.push(clampScore(0.49 + randn() * 0.16));
+      }
+      return { pos, neg };
+    }
+
+    /** 合并为 { score, label }，label 1=正，0=负 */
+    function toSamples(data) {
+      const out = [];
+      data.pos.forEach(s => out.push({ score: s, label: 1 }));
+      data.neg.forEach(s => out.push({ score: s, label: 0 }));
+      return out;
+    }
+
+    /**
+     * 给定阈值 τ：score >= τ → 预测为正
+     * τ=1 且全部分数 < 1 → TP=0, FP=0, FN=#pos, TN=#neg
+     */
+    function confusionAtThreshold(samples, threshold) {
+      let TP = 0, FP = 0, TN = 0, FN = 0;
+      for (const { score, label } of samples) {
+        const predPos = score >= threshold;
+        if (label === 1) {
+          if (predPos) TP++; else FN++;
+        } else {
+          if (predPos) FP++; else TN++;
+        }
+      }
+      return { TP, FP, TN, FN };
+    }
+
+    /**
+     * 构建 ROC 折线：按阈值从 +∞ 降到 0，等价于按分数从高到低逐个把样本判为正
+     * 返回点列 (FPR, TPR)，含 (0,0) 与 (1,1)，且按 FPR 非减排列便于画图与积分
+     */
+    function buildROC(samples) {
+      const nPos = samples.filter(s => s.label === 1).length;
+      const nNeg = samples.filter(s => s.label === 0).length;
+      if (nPos === 0 || nNeg === 0) {
+        return { fpr: [0, 1], tpr: [0, 1], thresholds: [Infinity, -Infinity] };
+      }
+      const sorted = [...samples].sort((a, b) => b.score - a.score);
+      const fpr = [0];
+      const tpr = [0];
+      const threshList = [Infinity]; // 虚拟起点：高于所有分数
+
+      let tp = 0, fp = 0;
+      for (let i = 0; i < sorted.length; i++) {
+        const { score, label } = sorted[i];
+        if (label === 1) tp++; else fp++;
+        const nextScore = i + 1 < sorted.length ? sorted[i + 1].score : -1;
+        // 在 (nextScore, score] 区间内 TPR/FPR 不变；在 score 处产生拐点
+        if (i === sorted.length - 1 || sorted[i + 1].score !== score) {
+          fpr.push(fp / nNeg);
+          tpr.push(tp / nPos);
+          threshList.push(score);
+        }
+      }
+      fpr.push(1);
+      tpr.push(1);
+      threshList.push(-Infinity);
+      return { fpr, tpr, thresholds: threshList };
+    }
+
+    /** 梯形法则：对 ROC 积分求 AUC（FPR 为横轴，TPR 为纵轴） */
+    function aucTrapezoid(fpr, tpr) {
+      let auc = 0;
+      for (let i = 1; i < fpr.length; i++) {
+        const dx = fpr[i] - fpr[i - 1];
+        auc += dx * (tpr[i] + tpr[i - 1]) * 0.5;
+      }
+      return auc;
+    }
+
+    /** 当前阈值在 ROC 上的 (FPR, TPR)，与 confusion 一致 */
+    function pointOnROCAtThreshold(samples, threshold, nPos, nNeg) {
+      const { TP, FP } = confusionAtThreshold(samples, threshold);
+      return { fpr: nNeg ? FP / nNeg : 0, tpr: nPos ? TP / nPos : 0 };
+    }
+
+    /**
+     * ROC 上从 τ=1 降到 currentT 所经过的折线段（按阈值从高到低）
+     * 收集所有 ROC 顶点中 threshold > currentT 的部分，再补上 currentT 处的点
+     */
+    function rocPathUpToThreshold(samples, roc, currentT) {
+      const nPos = samples.filter(s => s.label === 1).length;
+      const nNeg = samples.filter(s => s.label === 0).length;
+      const { fpr, tpr, thresholds } = roc;
+      const pathFpr = [];
+      const pathTpr = [];
+      // 从 (0,0) 开始，沿顶点走，直到阈值降到 currentT 以下
+      pathFpr.push(fpr[0]);
+      pathTpr.push(tpr[0]);
+      for (let k = 1; k < thresholds.length - 1; k++) {
+        const th = thresholds[k];
+        if (th > currentT) {
+          pathFpr.push(fpr[k]);
+          pathTpr.push(tpr[k]);
+        } else break;
+      }
+      const cur = pointOnROCAtThreshold(samples, currentT, nPos, nNeg);
+      const lastF = pathFpr[pathFpr.length - 1];
+      const lastT = pathTpr[pathTpr.length - 1];
+      if (lastF !== cur.fpr || lastT !== cur.tpr) {
+        pathFpr.push(cur.fpr);
+        pathTpr.push(cur.tpr);
+      }
+      return { pathFpr, pathTpr, cur };
+    }
+
+    // ---------- 状态 ----------
+    let currentKind = 'good';
+    let samples = [];
+    let rocData = { fpr: [], tpr: [], thresholds: [] };
+    let aucFull = 0;
+
+    const layoutDark = {
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(15,23,42,0.6)',
+      font: { color: '#94a3b8', family: 'system-ui, sans-serif' },
+      margin: { t: 36, r: 24, b: 48, l: 56 },
+      xaxis: { gridcolor: '#334155', zerolinecolor: '#475569' },
+      yaxis: { gridcolor: '#334155', zerolinecolor: '#475569' },
+      showlegend: true,
+      legend: { orientation: 'h', y: 1.12, x: 0, font: { size: 11 } }
+    };
+
+    function sliderToThreshold(v) {
+      return v / 1000;
+    }
+
+    function refreshData(kind) {
+      const raw = generateDataset(kind);
+      samples = toSamples(raw);
+      rocData = buildROC(samples);
+      aucFull = aucTrapezoid(rocData.fpr, rocData.tpr);
+    }
+
+    function drawDistribution(threshold) {
+      const pos = samples.filter(s => s.label === 1).map(s => s.score);
+      const neg = samples.filter(s => s.label === 0).map(s => s.score);
+
+      const tracePos = {
+        type: 'histogram',
+        name: '正样本',
+        x: pos,
+        opacity: 0.65,
+        marker: { color: '#34d399', line: { width: 0 } },
+        xbins: { start: 0, end: 1, size: 0.04 }
+      };
+      const traceNeg = {
+        type: 'histogram',
+        name: '负样本',
+        x: neg,
+        opacity: 0.65,
+        marker: { color: '#f87171', line: { width: 0 } },
+        xbins: { start: 0, end: 1, size: 0.04 }
+      };
+
+      const shapes = [
+        {
+          type: 'line',
+          x0: threshold,
+          x1: threshold,
+          y0: 0,
+          y1: 1,
+          yref: 'paper',
+          line: { color: '#fbbf24', width: 3, dash: 'solid' }
+        }
+      ];
+
+      const layout = {
+        ...layoutDark,
+        barmode: 'overlay',
+        xaxis: { ...layoutDark.xaxis, title: '预测分数', range: [0, 1] },
+        yaxis: { ...layoutDark.yaxis, title: '频数' },
+        shapes
+      };
+
+      Plotly.react('distPlot', [traceNeg, tracePos], layout, { responsive: true, displayModeBar: false });
+    }
+
+    function drawROC(threshold) {
+      const { fpr, tpr } = rocData;
+      const { pathFpr, pathTpr, cur } = rocPathUpToThreshold(samples, rocData, threshold);
+
+      const traceFull = {
+        type: 'scatter',
+        mode: 'lines',
+        name: '完整 ROC',
+        x: fpr,
+        y: tpr,
+        line: { color: '#64748b', width: 2 },
+        hoverinfo: 'skip'
+      };
+      const tracePath = {
+        type: 'scatter',
+        mode: 'lines',
+        name: 'τ 轨迹',
+        x: pathFpr,
+        y: pathTpr,
+        line: { color: '#38bdf8', width: 4 },
+        hovertemplate: 'FPR=%{x:.3f}<br>TPR=%{y:.3f}<extra></extra>'
+      };
+      const traceDot = {
+        type: 'scatter',
+        mode: 'markers',
+        name: '当前点',
+        x: [cur.fpr],
+        y: [cur.tpr],
+        marker: { size: 14, color: '#fbbf24', line: { color: '#fff', width: 2 } },
+        hovertemplate: 'FPR=%{x:.3f}<br>TPR=%{y:.3f}<extra></extra>'
+      };
+      const diag = {
+        type: 'scatter',
+        mode: 'lines',
+        name: '随机',
+        x: [0, 1],
+        y: [0, 1],
+        line: { color: '#475569', width: 1, dash: 'dash' },
+        hoverinfo: 'skip'
+      };
+
+      const layout = {
+        ...layoutDark,
+        xaxis: { ...layoutDark.xaxis, title: 'FPR', range: [-0.02, 1.02] },
+        yaxis: { ...layoutDark.yaxis, title: 'TPR', range: [-0.02, 1.02] },
+        legend: { ...layoutDark.legend, y: 1.15 }
+      };
+
+      Plotly.react('rocPlot', [diag, traceFull, tracePath, traceDot], layout, { responsive: true, displayModeBar: false });
+    }
+
+    function updateUI(threshold) {
+      const { TP, FP, TN, FN } = confusionAtThreshold(samples, threshold);
+      document.getElementById('valTP').textContent = TP;
+      document.getElementById('valFP').textContent = FP;
+      document.getElementById('valTN').textContent = TN;
+      document.getElementById('valFN').textContent = FN;
+
+      const nPos = TP + FN;
+      const nNeg = TN + FP;
+      const tpr = nPos ? TP / nPos : 0;
+      const fpr = nNeg ? FP / nNeg : 0;
+      document.getElementById('metricTPR').textContent = nPos ? tpr.toFixed(4) : '—';
+      document.getElementById('metricFPR').textContent = nNeg ? fpr.toFixed(4) : '—';
+      document.getElementById('metricAUC').textContent = aucFull.toFixed(4);
+
+      drawDistribution(threshold);
+      drawROC(threshold);
+    }
+
+    // ---------- 初始化与事件 ----------
+    function setActiveTab(kind) {
+      document.querySelectorAll('.ds-tab').forEach(btn => {
+        const k = btn.dataset.dataset;
+        const on = k === kind;
+        btn.classList.toggle('bg-emerald-600', on);
+        btn.classList.toggle('text-white', on);
+        btn.classList.toggle('ring-2', on);
+        btn.classList.toggle('ring-emerald-400', on);
+        btn.classList.toggle('bg-slate-800', !on);
+        btn.classList.toggle('text-slate-300', !on);
+      });
+    }
+
+    document.querySelectorAll('.ds-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentKind = btn.dataset.dataset;
+        setActiveTab(currentKind);
+        refreshData(currentKind);
+        const slider = document.getElementById('threshold');
+        slider.value = 1000;
+        document.getElementById('thresholdDisplay').textContent = '1.000';
+        updateUI(1);
+      });
+    });
+
+    document.getElementById('threshold').addEventListener('input', (e) => {
+      const t = sliderToThreshold(Number(e.target.value));
+      document.getElementById('thresholdDisplay').textContent = t.toFixed(3);
+      updateUI(t);
+    });
+
+    refreshData(currentKind);
+    setActiveTab(currentKind);
+    updateUI(1);
+  </script>
+</body>
+</html>
